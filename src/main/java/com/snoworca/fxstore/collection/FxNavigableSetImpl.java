@@ -151,16 +151,35 @@ public class FxNavigableSetImpl<E> implements NavigableSet<E>, FxCollection {
         return modified;
     }
     
+    /**
+     * 지정된 컬렉션에 포함된 요소만 유지합니다.
+     *
+     * <p>BUG-V11-001 수정: iterator().remove() 대신 map.remove() 직접 호출
+     *
+     * @param c 유지할 요소를 포함하는 컬렉션
+     * @return 집합이 변경되면 true
+     * @throws NullPointerException c가 null인 경우
+     */
     @Override
     public boolean retainAll(Collection<?> c) {
+        Objects.requireNonNull(c, "Collection cannot be null");
+
+        // 1단계: 삭제할 요소 수집
+        List<E> toRemove = new ArrayList<>();
+        for (E element : this) {
+            if (!c.contains(element)) {
+                toRemove.add(element);
+            }
+        }
+
+        // 2단계: 수집된 요소 삭제 (map.remove() 직접 호출)
         boolean modified = false;
-        Iterator<E> it = iterator();
-        while (it.hasNext()) {
-            if (!c.contains(it.next())) {
-                it.remove();
+        for (E element : toRemove) {
+            if (map.remove(element) != null) {
                 modified = true;
             }
         }
+
         return modified;
     }
     
@@ -406,6 +425,27 @@ public class FxNavigableSetImpl<E> implements NavigableSet<E>, FxCollection {
             parent.clear();
         }
 
+        /**
+         * BUG-V11-001 수정: retainAll() 오버라이드
+         */
+        @Override
+        public boolean retainAll(Collection<?> c) {
+            Objects.requireNonNull(c, "Collection cannot be null");
+            List<E> toRemove = new ArrayList<>();
+            for (E element : this) {
+                if (!c.contains(element)) {
+                    toRemove.add(element);
+                }
+            }
+            boolean modified = false;
+            for (E element : toRemove) {
+                if (remove(element)) {
+                    modified = true;
+                }
+            }
+            return modified;
+        }
+
         @Override
         public Comparator<? super E> comparator() {
             return Collections.reverseOrder(parent.comparator());
@@ -595,6 +635,27 @@ public class FxNavigableSetImpl<E> implements NavigableSet<E>, FxCollection {
             return parent.remove(o);
         }
 
+        /**
+         * BUG-V11-001 수정: SubSetView.retainAll() 오버라이드
+         */
+        @Override
+        public boolean retainAll(Collection<?> c) {
+            Objects.requireNonNull(c, "Collection cannot be null");
+            List<E> toRemove = new ArrayList<>();
+            for (E element : this) {
+                if (!c.contains(element)) {
+                    toRemove.add(element);
+                }
+            }
+            boolean modified = false;
+            for (E element : toRemove) {
+                if (remove(element)) {
+                    modified = true;
+                }
+            }
+            return modified;
+        }
+
         @Override
         public Comparator<? super E> comparator() {
             return parent.comparator();
@@ -766,6 +827,15 @@ public class FxNavigableSetImpl<E> implements NavigableSet<E>, FxCollection {
         @Override public boolean add(E e) { return parent.add(e); }
         @Override public boolean remove(Object o) { return parent.remove(o); }
         @Override public void clear() { for (E e : new ArrayList<>(parent)) { parent.remove(e); } }
+        /** BUG-V11-001 수정 */
+        @Override public boolean retainAll(Collection<?> c) {
+            Objects.requireNonNull(c, "Collection cannot be null");
+            List<E> toRemove = new ArrayList<>();
+            for (E element : this) { if (!c.contains(element)) { toRemove.add(element); } }
+            boolean modified = false;
+            for (E element : toRemove) { if (remove(element)) { modified = true; } }
+            return modified;
+        }
         @Override public Comparator<? super E> comparator() { return Collections.reverseOrder(parent.comparator()); }
         @Override public E first() { return parent.last(); }
         @Override public E last() { return parent.first(); }
@@ -868,6 +938,27 @@ public class FxNavigableSetImpl<E> implements NavigableSet<E>, FxCollection {
                 return false;
             }
             return parent.remove(o);
+        }
+
+        /**
+         * BUG-V11-001 수정: HeadSetView.retainAll() 오버라이드
+         */
+        @Override
+        public boolean retainAll(Collection<?> c) {
+            Objects.requireNonNull(c, "Collection cannot be null");
+            List<E> toRemove = new ArrayList<>();
+            for (E element : this) {
+                if (!c.contains(element)) {
+                    toRemove.add(element);
+                }
+            }
+            boolean modified = false;
+            for (E element : toRemove) {
+                if (remove(element)) {
+                    modified = true;
+                }
+            }
+            return modified;
         }
 
         @Override
@@ -1037,6 +1128,15 @@ public class FxNavigableSetImpl<E> implements NavigableSet<E>, FxCollection {
         @Override public boolean add(E e) { return parent.add(e); }
         @Override public boolean remove(Object o) { return parent.remove(o); }
         @Override public void clear() { for (E e : new ArrayList<>(parent)) { parent.remove(e); } }
+        /** BUG-V11-001 수정 */
+        @Override public boolean retainAll(Collection<?> c) {
+            Objects.requireNonNull(c, "Collection cannot be null");
+            List<E> toRemove = new ArrayList<>();
+            for (E element : this) { if (!c.contains(element)) { toRemove.add(element); } }
+            boolean modified = false;
+            for (E element : toRemove) { if (remove(element)) { modified = true; } }
+            return modified;
+        }
         @Override public Comparator<? super E> comparator() { return Collections.reverseOrder(parent.comparator()); }
         @Override public E first() { return parent.last(); }
         @Override public E last() { return parent.first(); }
@@ -1139,6 +1239,27 @@ public class FxNavigableSetImpl<E> implements NavigableSet<E>, FxCollection {
                 return false;
             }
             return parent.remove(o);
+        }
+
+        /**
+         * BUG-V11-001 수정: TailSetView.retainAll() 오버라이드
+         */
+        @Override
+        public boolean retainAll(Collection<?> c) {
+            Objects.requireNonNull(c, "Collection cannot be null");
+            List<E> toRemove = new ArrayList<>();
+            for (E element : this) {
+                if (!c.contains(element)) {
+                    toRemove.add(element);
+                }
+            }
+            boolean modified = false;
+            for (E element : toRemove) {
+                if (remove(element)) {
+                    modified = true;
+                }
+            }
+            return modified;
         }
 
         @Override
@@ -1308,6 +1429,15 @@ public class FxNavigableSetImpl<E> implements NavigableSet<E>, FxCollection {
         @Override public boolean add(E e) { return parent.add(e); }
         @Override public boolean remove(Object o) { return parent.remove(o); }
         @Override public void clear() { for (E e : new ArrayList<>(parent)) { parent.remove(e); } }
+        /** BUG-V11-001 수정 */
+        @Override public boolean retainAll(Collection<?> c) {
+            Objects.requireNonNull(c, "Collection cannot be null");
+            List<E> toRemove = new ArrayList<>();
+            for (E element : this) { if (!c.contains(element)) { toRemove.add(element); } }
+            boolean modified = false;
+            for (E element : toRemove) { if (remove(element)) { modified = true; } }
+            return modified;
+        }
         @Override public Comparator<? super E> comparator() { return Collections.reverseOrder(parent.comparator()); }
         @Override public E first() { return parent.last(); }
         @Override public E last() { return parent.first(); }

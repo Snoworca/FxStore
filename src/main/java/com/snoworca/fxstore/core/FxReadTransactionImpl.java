@@ -102,10 +102,46 @@ public class FxReadTransactionImpl implements FxReadTransaction {
     }
 
     /**
-     * BTree 생성 (스냅샷의 rootPageId 사용하지 않음 - 별도로 전달)
+     * BTree 생성 (unsigned byte 비교, Deque 전용)
+     *
+     * <p>Deque는 OrderedSeqEncoder가 XOR + BigEndian 인코딩을 사용하므로
+     * unsigned byte 비교가 올바른 순서를 보장합니다.</p>
      */
     private BTree createBTree(long collectionId) {
-        Comparator<byte[]> byteComparator = (a, b) -> {
+        Comparator<byte[]> byteComparator = createUnsignedByteComparator();
+        return new BTree(
+            store.getStorage(),
+            store.getPageSize(),
+            byteComparator,
+            0  // rootPageId는 각 연산에서 별도로 제공
+        );
+    }
+
+    /**
+     * BTree 생성 (코덱 기반 비교, NavigableMap/Set 전용)
+     *
+     * <p>BUG-V12-001 수정: 코덱의 compareBytes()를 사용하여 signed 숫자 타입에서
+     * 올바른 정렬 순서를 보장합니다.</p>
+     *
+     * @param collectionId 컬렉션 ID
+     * @param keyCodec 키 코덱
+     * @return BTree 인스턴스
+     */
+    private BTree createBTreeWithCodec(long collectionId, FxCodec<?> keyCodec) {
+        Comparator<byte[]> byteComparator = (a, b) -> keyCodec.compareBytes(a, b);
+        return new BTree(
+            store.getStorage(),
+            store.getPageSize(),
+            byteComparator,
+            0  // rootPageId는 각 연산에서 별도로 제공
+        );
+    }
+
+    /**
+     * Unsigned byte 비교자 생성 (Deque 등 unsigned 순서 인코딩용)
+     */
+    private Comparator<byte[]> createUnsignedByteComparator() {
+        return (a, b) -> {
             int minLen = Math.min(a.length, b.length);
             for (int i = 0; i < minLen; i++) {
                 int cmp = (a[i] & 0xFF) - (b[i] & 0xFF);
@@ -115,13 +151,6 @@ public class FxReadTransactionImpl implements FxReadTransaction {
             }
             return a.length - b.length;
         };
-
-        return new BTree(
-            store.getStorage(),
-            store.getPageSize(),
-            byteComparator,
-            0  // rootPageId는 각 연산에서 별도로 제공
-        );
     }
 
     // ==================== Map 연산 ====================
@@ -145,10 +174,11 @@ public class FxReadTransactionImpl implements FxReadTransaction {
         }
 
         // 키 인코딩
-        byte[] keyBytes = encodeKey(impl, key);
+        FxCodec<K> keyCodec = getKeyCodec(impl);
+        byte[] keyBytes = keyCodec.encode(key);
 
-        // 스냅샷 기반 검색
-        BTree btree = createBTree(collectionId);
+        // 스냅샷 기반 검색 (코덱 기반 비교 사용)
+        BTree btree = createBTreeWithCodec(collectionId, keyCodec);
         Long valueRecordId = btree.findWithRoot(rootPageId, keyBytes);
 
         if (valueRecordId == null) {
@@ -177,8 +207,9 @@ public class FxReadTransactionImpl implements FxReadTransaction {
             return false;
         }
 
-        byte[] keyBytes = encodeKey(impl, key);
-        BTree btree = createBTree(collectionId);
+        FxCodec<K> keyCodec = getKeyCodec(impl);
+        byte[] keyBytes = keyCodec.encode(key);
+        BTree btree = createBTreeWithCodec(collectionId, keyCodec);
         return btree.findWithRoot(rootPageId, keyBytes) != null;
     }
 
@@ -196,7 +227,8 @@ public class FxReadTransactionImpl implements FxReadTransaction {
             return null;
         }
 
-        BTree btree = createBTree(collectionId);
+        FxCodec<K> keyCodec = getKeyCodec(impl);
+        BTree btree = createBTreeWithCodec(collectionId, keyCodec);
         BTreeCursor cursor = btree.cursorWithRoot(rootPageId);
 
         if (!cursor.hasNext()) {
@@ -204,7 +236,7 @@ public class FxReadTransactionImpl implements FxReadTransaction {
         }
 
         BTree.Entry entry = cursor.next();
-        K key = decodeKey(impl, entry.getKey());
+        K key = keyCodec.decode(entry.getKey());
         byte[] valueBytes = store.readValueRecord(entry.getValueRecordId());
         V value = decodeValue(impl, valueBytes);
 
@@ -225,8 +257,9 @@ public class FxReadTransactionImpl implements FxReadTransaction {
             return null;
         }
 
-        // 역순 커서로 마지막 엔트리 획득
-        BTree btree = createBTree(collectionId);
+        // 역순 커서로 마지막 엔트리 획득 (코덱 기반 비교 사용)
+        FxCodec<K> keyCodec = getKeyCodec(impl);
+        BTree btree = createBTreeWithCodec(collectionId, keyCodec);
         Iterator<BTree.Entry> cursor = btree.descendingCursorWithRoot(rootPageId);
 
         if (!cursor.hasNext()) {
@@ -234,7 +267,7 @@ public class FxReadTransactionImpl implements FxReadTransaction {
         }
 
         BTree.Entry entry = cursor.next();
-        K key = decodeKey(impl, entry.getKey());
+        K key = keyCodec.decode(entry.getKey());
         byte[] valueBytes = store.readValueRecord(entry.getValueRecordId());
         V value = decodeValue(impl, valueBytes);
 
@@ -242,10 +275,12 @@ public class FxReadTransactionImpl implements FxReadTransaction {
     }
 
     @Override
+    @SuppressWarnings("unchecked")
     public <K, V> int size(NavigableMap<K, V> map) {
         checkActive();
         FxCollection fxColl = validateCollection(map);
 
+        FxNavigableMapImpl<K, V> impl = (FxNavigableMapImpl<K, V>) map;
         long collectionId = fxColl.getCollectionId();
         long rootPageId = getRootPageId(collectionId);
 
@@ -253,8 +288,9 @@ public class FxReadTransactionImpl implements FxReadTransaction {
             return 0;
         }
 
-        // BTree 순회하여 카운트
-        BTree btree = createBTree(collectionId);
+        // BTree 순회하여 카운트 (코덱 기반 비교 사용)
+        FxCodec<K> keyCodec = getKeyCodec(impl);
+        BTree btree = createBTreeWithCodec(collectionId, keyCodec);
         BTreeCursor cursor = btree.cursorWithRoot(rootPageId);
         int count = 0;
         while (cursor.hasNext()) {
@@ -285,10 +321,11 @@ public class FxReadTransactionImpl implements FxReadTransaction {
             return false;
         }
 
-        // Set의 내부 map을 통해 keyCodec 접근
-        byte[] keyBytes = encodeSetElement(impl, element);
+        // Set의 내부 map을 통해 keyCodec 접근 (코덱 기반 비교 사용)
+        FxCodec<E> elementCodec = getSetElementCodec(impl);
+        byte[] keyBytes = elementCodec.encode(element);
 
-        BTree btree = createBTree(collectionId);
+        BTree btree = createBTreeWithCodec(collectionId, elementCodec);
         return btree.findWithRoot(rootPageId, keyBytes) != null;
     }
 
@@ -306,7 +343,8 @@ public class FxReadTransactionImpl implements FxReadTransaction {
             return null;
         }
 
-        BTree btree = createBTree(collectionId);
+        FxCodec<E> elementCodec = getSetElementCodec(impl);
+        BTree btree = createBTreeWithCodec(collectionId, elementCodec);
         BTreeCursor cursor = btree.cursorWithRoot(rootPageId);
 
         if (!cursor.hasNext()) {
@@ -314,7 +352,7 @@ public class FxReadTransactionImpl implements FxReadTransaction {
         }
 
         BTree.Entry entry = cursor.next();
-        return decodeSetElement(impl, entry.getKey());
+        return elementCodec.decode(entry.getKey());
     }
 
     @Override
@@ -331,7 +369,8 @@ public class FxReadTransactionImpl implements FxReadTransaction {
             return null;
         }
 
-        BTree btree = createBTree(collectionId);
+        FxCodec<E> elementCodec = getSetElementCodec(impl);
+        BTree btree = createBTreeWithCodec(collectionId, elementCodec);
         Iterator<BTree.Entry> cursor = btree.descendingCursorWithRoot(rootPageId);
 
         if (!cursor.hasNext()) {
@@ -339,14 +378,16 @@ public class FxReadTransactionImpl implements FxReadTransaction {
         }
 
         BTree.Entry entry = cursor.next();
-        return decodeSetElement(impl, entry.getKey());
+        return elementCodec.decode(entry.getKey());
     }
 
     @Override
+    @SuppressWarnings("unchecked")
     public <E> int size(NavigableSet<E> set) {
         checkActive();
         FxCollection fxColl = validateCollection(set);
 
+        FxNavigableSetImpl<E> impl = (FxNavigableSetImpl<E>) set;
         long collectionId = fxColl.getCollectionId();
         long rootPageId = getRootPageId(collectionId);
 
@@ -354,7 +395,8 @@ public class FxReadTransactionImpl implements FxReadTransaction {
             return 0;
         }
 
-        BTree btree = createBTree(collectionId);
+        FxCodec<E> elementCodec = getSetElementCodec(impl);
+        BTree btree = createBTreeWithCodec(collectionId, elementCodec);
         BTreeCursor cursor = btree.cursorWithRoot(rootPageId);
         int count = 0;
         while (cursor.hasNext()) {
@@ -623,6 +665,44 @@ public class FxReadTransactionImpl implements FxReadTransaction {
     }
 
     // ==================== 코덱 헬퍼 (리플렉션 기반) ====================
+
+    /**
+     * Map의 keyCodec 조회
+     *
+     * @param map 대상 Map
+     * @return keyCodec
+     */
+    @SuppressWarnings("unchecked")
+    private <K, V> FxCodec<K> getKeyCodec(FxNavigableMapImpl<K, V> map) {
+        try {
+            java.lang.reflect.Field field = FxNavigableMapImpl.class.getDeclaredField("keyCodec");
+            field.setAccessible(true);
+            return (FxCodec<K>) field.get(map);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to get keyCodec", e);
+        }
+    }
+
+    /**
+     * Set의 elementCodec 조회 (내부 map의 keyCodec 사용)
+     *
+     * @param set 대상 Set
+     * @return elementCodec
+     */
+    @SuppressWarnings("unchecked")
+    private <E> FxCodec<E> getSetElementCodec(FxNavigableSetImpl<E> set) {
+        try {
+            java.lang.reflect.Field mapField = FxNavigableSetImpl.class.getDeclaredField("map");
+            mapField.setAccessible(true);
+            FxNavigableMapImpl<E, Boolean> internalMap = (FxNavigableMapImpl<E, Boolean>) mapField.get(set);
+
+            java.lang.reflect.Field codecField = FxNavigableMapImpl.class.getDeclaredField("keyCodec");
+            codecField.setAccessible(true);
+            return (FxCodec<E>) codecField.get(internalMap);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to get set element codec", e);
+        }
+    }
 
     /**
      * Map 키 인코딩

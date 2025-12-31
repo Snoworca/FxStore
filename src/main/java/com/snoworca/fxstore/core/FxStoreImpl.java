@@ -108,22 +108,30 @@ public class FxStoreImpl implements FxStore {
     private final Map<String, Object> openCollections;
 
     private volatile boolean closed = false;
-    private long nextCollectionId = 1L;
+
+    /**
+     * IMP-001: 다음 컬렉션 ID (volatile 추가)
+     *
+     * <p>Write Lock 내에서만 수정되므로 현재도 안전하지만,
+     * 의도 명확성과 코드 일관성을 위해 volatile 추가.</p>
+     */
+    private volatile long nextCollectionId = 1L;
 
     // BATCH 모드 전용
     private volatile boolean hasPendingChanges = false;
 
     /**
-     * 작업 중 allocTail (Stateless API 지원)
+     * IMP-002: 작업 중 allocTail (Stateless API 지원, volatile 추가)
      *
      * <p>쓰기 연산 시작 시 snapshot().getAllocTail()에서 초기화되고,
      * 각 할당 후 업데이트됩니다. 연산 완료 후 스냅샷 생성에 사용됩니다.</p>
      *
-     * <p><b>스레드 안전성:</b> 쓰기 락 내에서만 접근되므로 스레드 안전합니다.</p>
+     * <p><b>스레드 안전성:</b> 쓰기 락 내에서만 접근되므로 현재도 안전하지만,
+     * 의도 명확성과 가시성 보장을 위해 volatile 추가.</p>
      *
      * @since 0.9
      */
-    private long workingAllocTail;
+    private volatile long workingAllocTail;
     
     /**
      * 메모리 기반 Store 생성자
@@ -1938,6 +1946,19 @@ public class FxStoreImpl implements FxStore {
     }
 
     /**
+     * 컬렉션의 현재 엔트리 수 반환 (PERF-001: O(1) size 지원)
+     *
+     * <p>CollectionState에 저장된 count를 직접 반환합니다.</p>
+     *
+     * @param collectionId 컬렉션 ID
+     * @return 엔트리 수, 컬렉션이 없으면 0
+     */
+    public long getCollectionCount(long collectionId) {
+        CollectionState state = collectionStates.get(collectionId);
+        return state != null ? state.getCount() : 0;
+    }
+
+    /**
      * CollectionState 업데이트 (마이그레이션용)
      *
      * <p><b>전제조건:</b> 쓰기 락을 보유한 상태에서 호출해야 합니다.</p>
@@ -1992,9 +2013,13 @@ public class FxStoreImpl implements FxStore {
     }
     
     /**
-     * 컬렉션의 BTree 조회 (내부용)
+     * 컬렉션의 BTree 조회 (내부용) - 기본 unsigned byte 비교
      *
      * <p><b>전제조건:</b> 쓰기 락을 보유한 상태에서 호출해야 합니다.</p>
+     *
+     * <p><b>주의:</b> 이 메서드는 Deque (OrderedSeqEncoder) 등 unsigned byte 비교가
+     * 적합한 경우에만 사용하세요. NavigableMap/Set은 코덱 기반 비교를 사용하는
+     * {@link #getBTreeForCollection(long, FxCodec)} 를 사용하세요.</p>
      */
     public BTree getBTreeForCollection(long collectionId) {
         CollectionState state = collectionStates.get(collectionId);
@@ -2004,8 +2029,49 @@ public class FxStoreImpl implements FxStore {
 
         long rootPageId = state.getRootPageId();
 
-        // 바이트 비교자 생성 (lexicographic order)
-        Comparator<byte[]> byteComparator = new Comparator<byte[]>() {
+        // 바이트 비교자 생성 (unsigned byte lexicographic order)
+        // Deque의 OrderedSeqEncoder가 XOR + BigEndian으로 unsigned 순서를 생성하므로
+        // 이 비교자와 호환됨
+        Comparator<byte[]> byteComparator = createUnsignedByteComparator();
+
+        // allocator를 전달하여 페이지 할당 일관성 유지
+        // (레거시 API 사용 - allocator가 내부적으로 allocTail 관리)
+        return new BTree(storage, options.pageSize().bytes(), byteComparator, rootPageId, allocator);
+    }
+
+    /**
+     * 컬렉션의 BTree 조회 (코덱 기반 비교) - NavigableMap/Set 전용
+     *
+     * <p><b>전제조건:</b> 쓰기 락을 보유한 상태에서 호출해야 합니다.</p>
+     *
+     * <p>코덱의 {@link FxCodec#compareBytes(byte[], byte[])} 메서드를 사용하여
+     * 타입에 맞는 정확한 비교를 수행합니다. I64Codec 등 signed 숫자 타입에서
+     * 올바른 정렬 순서를 보장합니다.</p>
+     *
+     * @param collectionId 컬렉션 ID
+     * @param keyCodec 키 코덱 (compareBytes 사용)
+     * @return BTree 인스턴스
+     * @throws FxException NOT_FOUND if collection not found
+     */
+    public BTree getBTreeForCollection(long collectionId, com.snoworca.fxstore.api.FxCodec<?> keyCodec) {
+        CollectionState state = collectionStates.get(collectionId);
+        if (state == null) {
+            throw FxException.notFound("Collection not found: id=" + collectionId);
+        }
+
+        long rootPageId = state.getRootPageId();
+
+        // 코덱의 compareBytes 사용 - 타입에 맞는 정확한 비교
+        Comparator<byte[]> byteComparator = (a, b) -> keyCodec.compareBytes(a, b);
+
+        return new BTree(storage, options.pageSize().bytes(), byteComparator, rootPageId, allocator);
+    }
+
+    /**
+     * Unsigned byte 비교자 생성 (Deque 등 unsigned 순서 인코딩용)
+     */
+    private Comparator<byte[]> createUnsignedByteComparator() {
+        return new Comparator<byte[]>() {
             @Override
             public int compare(byte[] a, byte[] b) {
                 int minLen = Math.min(a.length, b.length);
@@ -2018,27 +2084,6 @@ public class FxStoreImpl implements FxStore {
                 return a.length - b.length;
             }
         };
-
-        // allocator를 전달하여 페이지 할당 일관성 유지
-        // (레거시 API 사용 - allocator가 내부적으로 allocTail 관리)
-        return new BTree(storage, options.pageSize().bytes(), byteComparator, rootPageId, allocator);
-    }
-    
-    /**
-     * 컬렉션 변경 알림 (루트 페이지 갱신)
-     *
-     * <p>v0.7: withRootPageId()를 사용하여 seqEncoderVersion 보존</p>
-     */
-    public void markCollectionChanged(long collectionId, long newRootPageId) {
-        CollectionState state = collectionStates.get(collectionId);
-        if (state == null) {
-            throw FxException.notFound("Collection not found: id=" + collectionId);
-        }
-
-        CollectionState updatedState = state.withRootPageId(newRootPageId);
-
-        collectionStates.put(collectionId, updatedState);
-        markPendingChanges();
     }
     
     /**
@@ -2092,6 +2137,12 @@ public class FxStoreImpl implements FxStore {
     
     /**
      * 키 비교자 생성 (코덱 기반)
+     *
+     * <p>BUG-V12-001 수정: 코덱의 compareBytes()를 사용하여 signed 숫자 타입에서
+     * 올바른 정렬 순서를 보장합니다.</p>
+     *
+     * @param codec 키 코덱
+     * @return 키 비교자
      */
     private <K> Comparator<K> createComparator(com.snoworca.fxstore.api.FxCodec<K> codec) {
         return new Comparator<K>() {
@@ -2099,15 +2150,8 @@ public class FxStoreImpl implements FxStore {
             public int compare(K a, K b) {
                 byte[] aBytes = codec.encode(a);
                 byte[] bBytes = codec.encode(b);
-
-                int minLen = Math.min(aBytes.length, bBytes.length);
-                for (int i = 0; i < minLen; i++) {
-                    int cmp = (aBytes[i] & 0xFF) - (bBytes[i] & 0xFF);
-                    if (cmp != 0) {
-                        return cmp;
-                    }
-                }
-                return aBytes.length - bBytes.length;
+                // 코덱의 compareBytes 사용 - 타입에 맞는 정확한 비교
+                return codec.compareBytes(aBytes, bBytes);
             }
         };
     }
@@ -2304,29 +2348,6 @@ public class FxStoreImpl implements FxStore {
         } else {
             hasPendingChanges = true;
         }
-    }
-
-    /**
-     * 스냅샷 상태를 레거시 필드와 동기화
-     *
-     * <p>점진적 마이그레이션을 위해 스냅샷의 상태를
-     * 기존 mutable 필드에도 반영합니다.</p>
-     *
-     * <p><b>주의:</b> 쓰기 락을 보유한 상태에서만 호출해야 합니다.</p>
-     *
-     * @param newSnapshot 동기화할 스냅샷
-     */
-    protected void syncSnapshotToLegacy(StoreSnapshot newSnapshot) {
-        // catalog 동기화
-        this.catalog.clear();
-        this.catalog.putAll(newSnapshot.getCatalog());
-
-        // collectionStates 동기화
-        this.collectionStates.clear();
-        this.collectionStates.putAll(newSnapshot.getStates());
-
-        // nextCollectionId 동기화
-        this.nextCollectionId = newSnapshot.getNextCollectionId();
     }
 
     /**

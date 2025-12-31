@@ -366,17 +366,19 @@ public class BTree {
                 // 분할 수행
                 BTreeLeaf.SplitResult splitResult = tempLeaf.split();
 
-                // 왼쪽 리프 저장
+                // BUG-V11-002 수정: 페이지 ID 선할당 후 단일 쓰기
+                // 1. 페이지 ID 선할당
                 long leftPageId = allocatePageId();
-                writeNode(splitResult.leftLeaf, leftPageId);
-
-                // 오른쪽 리프 저장
                 long rightPageId = allocatePageId();
-                writeNode(splitResult.rightLeaf, rightPageId);
 
-                // 왼쪽 리프의 nextLeaf 연결
+                // 2. 왼쪽 리프의 nextLeaf 연결 (쓰기 전에 설정)
                 splitResult.leftLeaf.setNextLeafPageId(rightPageId);
+
+                // 3. 왼쪽 리프 저장 (단일 쓰기)
                 writeNode(splitResult.leftLeaf, leftPageId);
+
+                // 4. 오른쪽 리프 저장
+                writeNode(splitResult.rightLeaf, rightPageId);
 
                 return new InsertResult(true, leftPageId, rightPageId, splitResult.splitKey);
             }

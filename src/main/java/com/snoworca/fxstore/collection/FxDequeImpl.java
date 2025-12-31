@@ -3,6 +3,8 @@ package com.snoworca.fxstore.collection;
 import com.snoworca.fxstore.btree.BTree;
 import com.snoworca.fxstore.btree.BTreeCursor;
 import com.snoworca.fxstore.api.FxCodec;
+import com.snoworca.fxstore.api.FxErrorCode;
+import com.snoworca.fxstore.api.FxException;
 import com.snoworca.fxstore.core.CodecUpgradeContext;
 import com.snoworca.fxstore.core.FxStoreImpl;
 
@@ -48,6 +50,15 @@ public class FxDequeImpl<E> implements Deque<E>, FxCollection {
     // volatile for wait-free reads (INV-C3)
     private volatile long headSeq; // 앞쪽 시퀀스 (감소)
     private volatile long tailSeq; // 뒤쪽 시퀀스 (증가)
+
+    /**
+     * IMP-003: 시퀀스 오버플로우 임계값
+     *
+     * <p>long의 1% 범위에 도달하면 경고. 이론상 9경(9 * 10^16)개 요소를
+     * 초당 백만 개씩 추가해도 285년 걸림. 실질적으로 발생 불가능하지만
+     * 방어적 프로그래밍을 위해 추가.</p>
+     */
+    private static final long OVERFLOW_THRESHOLD = Long.MAX_VALUE / 100;
 
     /**
      * 생성자 (기본: LegacySeqEncoder for backward compatibility)
@@ -173,7 +184,23 @@ public class FxDequeImpl<E> implements Deque<E>, FxCollection {
         Long rootPageId = store.snapshot().getRootPageId(collectionId);
         return rootPageId != null ? rootPageId : 0;
     }
-    
+
+    /**
+     * IMP-003: 시퀀스 오버플로우 방어 검사
+     *
+     * <p>headSeq가 -OVERFLOW_THRESHOLD 미만이거나
+     * tailSeq가 OVERFLOW_THRESHOLD 초과하면 예외 발생.</p>
+     *
+     * @throws FxException 시퀀스가 임계값을 초과한 경우
+     */
+    private void checkSequenceOverflow() {
+        if (headSeq < -OVERFLOW_THRESHOLD || tailSeq > OVERFLOW_THRESHOLD) {
+            throw new FxException(FxErrorCode.INTERNAL,
+                "Deque sequence nearing overflow: headSeq=" + headSeq +
+                ", tailSeq=" + tailSeq + ", threshold=±" + OVERFLOW_THRESHOLD);
+        }
+    }
+
     @Override
     public void addFirst(E e) {
         if (e == null) {
@@ -185,6 +212,9 @@ public class FxDequeImpl<E> implements Deque<E>, FxCollection {
         // Single Writer (INV-C1): Write Lock 획득
         long stamp = store.acquireWriteLock();
         try {
+            // IMP-003: 오버플로우 방어 검사
+            checkSequenceOverflow();
+
             long currentRoot = getCurrentRootPageId();
             BTree btree = getBTree();
 
@@ -236,6 +266,9 @@ public class FxDequeImpl<E> implements Deque<E>, FxCollection {
         if (e == null) {
             throw new NullPointerException();
         }
+
+        // IMP-003: 오버플로우 방어 검사
+        checkSequenceOverflow();
 
         byte[] valueBytes = encodeElement(e);
         long currentRoot = getCurrentRootPageId();

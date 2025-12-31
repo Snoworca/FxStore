@@ -460,4 +460,151 @@ public class FxNavigableSetCoverageTest {
         assertFalse(set1.contains(20L));
         assertFalse(set2.contains(10L));
     }
+
+    // ==================== headSet/tailSet 단일 인자 테스트 ====================
+
+    @Test
+    public void set_headSet_singleArg_shouldWork() {
+        NavigableSet<Long> set = store.createSet("test", Long.class);
+        for (long i = 1; i <= 10; i++) {
+            set.add(i);
+        }
+
+        // headSet(5L) - exclusive by default
+        SortedSet<Long> head = set.headSet(5L);
+
+        assertEquals(4, head.size()); // 1, 2, 3, 4
+        assertTrue(head.contains(4L));
+        assertFalse(head.contains(5L));
+    }
+
+    @Test
+    public void set_tailSet_singleArg_shouldWork() {
+        NavigableSet<Long> set = store.createSet("test", Long.class);
+        for (long i = 1; i <= 10; i++) {
+            set.add(i);
+        }
+
+        // tailSet(5L) - inclusive by default
+        SortedSet<Long> tail = set.tailSet(5L);
+
+        assertEquals(6, tail.size()); // 5, 6, 7, 8, 9, 10
+        assertTrue(tail.contains(5L));
+        assertFalse(tail.contains(4L));
+    }
+
+    @Test
+    public void set_subSet_singleArg_shouldWork() {
+        NavigableSet<Long> set = store.createSet("test", Long.class);
+        for (long i = 1; i <= 10; i++) {
+            set.add(i);
+        }
+
+        // subSet(3L, 7L) - fromInclusive, toExclusive by default
+        SortedSet<Long> sub = set.subSet(3L, 7L);
+
+        assertEquals(4, sub.size()); // 3, 4, 5, 6
+        assertTrue(sub.contains(3L));
+        assertTrue(sub.contains(6L));
+        assertFalse(sub.contains(7L));
+    }
+
+    // ==================== SubSetView의 headSet/tailSet 단일 인자 테스트 ====================
+
+    @Test
+    public void subSetView_headSet_singleArg_shouldWork() {
+        NavigableSet<Long> set = store.createSet("test", Long.class);
+        for (long i = 1; i <= 20; i++) {
+            set.add(i);
+        }
+
+        NavigableSet<Long> sub = set.subSet(5L, true, 15L, true);
+        SortedSet<Long> head = sub.headSet(10L);
+
+        assertEquals(5, head.size()); // 5, 6, 7, 8, 9
+        assertTrue(head.contains(5L));
+        assertFalse(head.contains(10L));
+    }
+
+    @Test
+    public void subSetView_tailSet_singleArg_shouldWork() {
+        NavigableSet<Long> set = store.createSet("test", Long.class);
+        for (long i = 1; i <= 20; i++) {
+            set.add(i);
+        }
+
+        NavigableSet<Long> sub = set.subSet(5L, true, 15L, true);
+        SortedSet<Long> tail = sub.tailSet(10L);
+
+        assertEquals(6, tail.size()); // 10, 11, 12, 13, 14, 15
+        assertTrue(tail.contains(10L));
+        assertTrue(tail.contains(15L));
+    }
+
+    @Test
+    public void subSetView_subSet_singleArg_shouldWork() {
+        NavigableSet<Long> set = store.createSet("test", Long.class);
+        for (long i = 1; i <= 20; i++) {
+            set.add(i);
+        }
+
+        NavigableSet<Long> sub = set.subSet(5L, true, 15L, true);
+        SortedSet<Long> subSub = sub.subSet(8L, 12L);
+
+        assertEquals(4, subSub.size()); // 8, 9, 10, 11
+        assertTrue(subSub.contains(8L));
+        assertFalse(subSub.contains(12L));
+    }
+
+    // ==================== addAll 테스트 ====================
+
+    @Test
+    public void set_addAll_shouldWork() {
+        NavigableSet<Long> set = store.createSet("test", Long.class);
+
+        set.addAll(Arrays.asList(1L, 2L, 3L));
+
+        assertEquals(3, set.size());
+        assertTrue(set.contains(1L));
+        assertTrue(set.contains(2L));
+        assertTrue(set.contains(3L));
+    }
+
+    @Test
+    public void set_addAll_withDuplicates_shouldIgnoreDuplicates() {
+        NavigableSet<Long> set = store.createSet("test", Long.class);
+        set.add(1L);
+
+        set.addAll(Arrays.asList(1L, 2L, 3L));
+
+        assertEquals(3, set.size());
+    }
+
+    // ==================== comparator 테스트 ====================
+
+    @Test
+    public void set_comparator_shouldWork() {
+        NavigableSet<Long> set = store.createSet("test", Long.class);
+        Comparator<? super Long> comp = set.comparator();
+        // Verify comparator works if present
+        if (comp != null) {
+            assertTrue(comp.compare(1L, 2L) < 0);
+            assertTrue(comp.compare(2L, 1L) > 0);
+            assertEquals(0, comp.compare(1L, 1L));
+        }
+    }
+
+    @Test
+    public void subSet_comparator_shouldWork() {
+        NavigableSet<Long> set = store.createSet("test", Long.class);
+        set.add(1L);
+        set.add(10L);
+
+        NavigableSet<Long> sub = set.subSet(3L, true, 8L, true);
+        Comparator<? super Long> comp = sub.comparator();
+        // Verify comparator works if present
+        if (comp != null) {
+            assertTrue(comp.compare(3L, 7L) < 0);
+        }
+    }
 }

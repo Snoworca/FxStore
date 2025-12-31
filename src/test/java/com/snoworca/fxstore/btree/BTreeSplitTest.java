@@ -281,6 +281,82 @@ public class BTreeSplitTest {
         assertTrue(descMap.containsKey(50L));
     }
 
+    // ==================== BUG-V11-002: 리프 분할 후 nextLeaf 연결 검증 ====================
+
+    /**
+     * TC-V11-002-01: 리프 분할 후 nextLeaf 연결 검증
+     *
+     * <p>BUG-V11-002 수정 후 리프 간 연결이 올바르게 유지되는지 확인
+     */
+    @Test
+    public void testLeafSplitNextLeafLink() {
+        NavigableMap<Integer, String> map = memoryStore.createMap("nextLeafTest", Integer.class, String.class);
+
+        // 리프 용량 초과하도록 충분한 엔트리 삽입
+        for (int i = 0; i < 200; i++) {
+            map.put(i, "value-" + i);
+        }
+
+        // 모든 엔트리가 순서대로 순회되어야 함 (nextLeaf 링크 정상)
+        int expected = 0;
+        for (Map.Entry<Integer, String> entry : map.entrySet()) {
+            assertEquals(Integer.valueOf(expected), entry.getKey());
+            expected++;
+        }
+        assertEquals(200, expected);
+    }
+
+    /**
+     * TC-V11-002-02: 대량 삽입 후 무결성 검증
+     */
+    @Test
+    public void testMassInsertIntegrity() {
+        NavigableMap<Integer, String> map = memoryStore.createMap("massInsert", Integer.class, String.class);
+
+        // 1000개 삽입 (다수의 분할 유발)
+        for (int i = 0; i < 1000; i++) {
+            map.put(i, "v" + i);
+        }
+
+        // 크기 확인
+        assertEquals(1000, map.size());
+
+        // 모든 키 존재 확인
+        for (int i = 0; i < 1000; i++) {
+            assertTrue("Key " + i + " should exist", map.containsKey(i));
+            assertEquals("v" + i, map.get(i));
+        }
+    }
+
+    /**
+     * TC-V11-002-03: 스토어 재오픈 후 무결성
+     */
+    @Test
+    public void testLeafSplitPersistence() throws Exception {
+        File tempFile = tempFolder.newFile("split-persist.fx");
+        tempFile.delete();
+
+        // 1. 데이터 삽입
+        try (FxStore store1 = FxStore.open(tempFile.toPath())) {
+            NavigableMap<Integer, String> map = store1.createMap("test", Integer.class, String.class);
+            for (int i = 0; i < 500; i++) {
+                map.put(i, "value-" + i);
+            }
+        }
+
+        // 2. 재오픈 후 검증
+        try (FxStore store2 = FxStore.open(tempFile.toPath())) {
+            NavigableMap<Integer, String> map = store2.openMap("test", Integer.class, String.class);
+            assertEquals(500, map.size());
+
+            // 모든 키 존재 및 값 확인
+            for (int i = 0; i < 500; i++) {
+                assertTrue("Key " + i + " should exist", map.containsKey(i));
+                assertEquals("value-" + i, map.get(i));
+            }
+        }
+    }
+
     // ==================== 파일 스토리지 테스트 ====================
 
     @Test

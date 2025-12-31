@@ -72,7 +72,8 @@ public class FxNavigableMapImpl<K, V> implements NavigableMap<K, V>, FxCollectio
     // ==================== 내부 헬퍼 ====================
 
     private BTree getBTree() {
-        return store.getBTreeForCollection(collectionId);
+        // 코덱 기반 비교 사용 - signed 숫자 타입에서 올바른 정렬 순서 보장
+        return store.getBTreeForCollection(collectionId, keyCodec);
     }
 
     /**
@@ -164,6 +165,8 @@ public class FxNavigableMapImpl<K, V> implements NavigableMap<K, V>, FxCollectio
      * <p><b>COW (Copy-on-Write)</b>: BTree 삽입은 stateless API를 통해
      * 새 루트 페이지를 생성하며, 이전 스냅샷에는 영향을 주지 않습니다.</p>
      *
+     * <p><b>CONC-001 수정</b>: oldValue 조회를 락 내에서 수행하여 TOCTOU 버그 해결</p>
+     *
      * @param key 값이 연결될 키
      * @param value 키에 연결될 값
      * @return 이전에 연결되어 있던 값, 또는 없으면 null
@@ -178,15 +181,22 @@ public class FxNavigableMapImpl<K, V> implements NavigableMap<K, V>, FxCollectio
         byte[] keyBytes = encodeKey(key);
         byte[] valueBytes = encodeValue(value);
 
-        // Wait-free read: 기존 값 확인 (락 없이)
-        V oldValue = get(key);
-
-        // Write Lock 획득 (INV-C1)
+        // Write Lock 획득 (INV-C1) - 모든 연산을 락 내에서 수행
         long stamp = store.acquireWriteLock();
         try {
             // 현재 스냅샷에서 루트 페이지 ID 획득
             long currentRoot = getCurrentRootPageId();
             BTree btree = getBTree();
+
+            // CONC-001 수정: 락 내에서 oldValue 조회
+            V oldValue = null;
+            boolean isNewKey = true;
+            Long existingRecordId = btree.findWithRoot(currentRoot, keyBytes);
+            if (existingRecordId != null) {
+                byte[] existingValueBytes = store.readValueRecord(existingRecordId);
+                oldValue = decodeValue(existingValueBytes);
+                isNewKey = false;
+            }
 
             // 값 레코드 작성 (allocator 사용)
             long valueRecordId = store.writeValueRecord(valueBytes);
@@ -194,17 +204,22 @@ public class FxNavigableMapImpl<K, V> implements NavigableMap<K, V>, FxCollectio
             // BTree 삽입 (COW - stateless API)
             BTree.StatelessInsertResult result = btree.insertWithRoot(currentRoot, keyBytes, valueRecordId);
 
-            // 스냅샷 업데이트 및 게시
-            store.updateCollectionRootAndPublish(collectionId, result.newRootPageId);
+            // PERF-001: 새 키 삽입 시 count 증가
+            if (isNewKey) {
+                long currentCount = store.getCollectionCount(collectionId);
+                store.updateCollectionRootCountAndPublish(collectionId, result.newRootPageId, currentCount + 1);
+            } else {
+                // 기존 키 업데이트 - count 변경 없음
+                store.updateCollectionRootAndPublish(collectionId, result.newRootPageId);
+            }
 
             // AUTO 모드면 즉시 커밋
             store.commitIfAuto();
 
+            return oldValue;
         } finally {
             store.releaseWriteLock(stamp);
         }
-
-        return oldValue;
     }
     
     /**
@@ -215,6 +230,8 @@ public class FxNavigableMapImpl<K, V> implements NavigableMap<K, V>, FxCollectio
      *
      * <p><b>COW (Copy-on-Write)</b>: BTree 삭제는 stateless API를 통해
      * 새 루트 페이지를 생성하며, 이전 스냅샷에는 영향을 주지 않습니다.</p>
+     *
+     * <p><b>CONC-001 수정</b>: oldValue 조회를 락 내에서 수행하여 TOCTOU 버그 해결</p>
      *
      * @param key 매핑이 제거될 키
      * @return 이전에 연결되어 있던 값, 또는 없으면 null
@@ -229,51 +246,62 @@ public class FxNavigableMapImpl<K, V> implements NavigableMap<K, V>, FxCollectio
         try {
             @SuppressWarnings("unchecked")
             K k = (K) key;
+            byte[] keyBytes = encodeKey(k);
 
-            // Wait-free read: 기존 값 확인 (락 없이)
-            V oldValue = get(k);
+            // Write Lock 획득 (INV-C1) - 모든 연산을 락 내에서 수행
+            long stamp = store.acquireWriteLock();
+            try {
+                // 현재 스냅샷에서 루트 페이지 ID 획득
+                long currentRoot = getCurrentRootPageId();
+                BTree btree = getBTree();
 
-            if (oldValue != null) {
-                byte[] keyBytes = encodeKey(k);
-
-                // Write Lock 획득 (INV-C1)
-                long stamp = store.acquireWriteLock();
-                try {
-                    // 현재 스냅샷에서 루트 페이지 ID 획득
-                    long currentRoot = getCurrentRootPageId();
-                    BTree btree = getBTree();
-
-                    // BTree 삭제 (COW - stateless API)
-                    BTree.StatelessDeleteResult result = btree.deleteWithRoot(currentRoot, keyBytes);
-
-                    if (result.deleted) {
-                        // 스냅샷 업데이트 및 게시
-                        store.updateCollectionRootAndPublish(collectionId, result.newRootPageId);
-
-                        // AUTO 모드면 즉시 커밋
-                        store.commitIfAuto();
-                    }
-                } finally {
-                    store.releaseWriteLock(stamp);
+                // CONC-001 수정: 락 내에서 oldValue 조회
+                Long existingRecordId = btree.findWithRoot(currentRoot, keyBytes);
+                if (existingRecordId == null) {
+                    return null;  // 키가 없으면 즉시 반환
                 }
-            }
 
-            return oldValue;
+                byte[] existingValueBytes = store.readValueRecord(existingRecordId);
+                V oldValue = decodeValue(existingValueBytes);
+
+                // BTree 삭제 (COW - stateless API)
+                BTree.StatelessDeleteResult result = btree.deleteWithRoot(currentRoot, keyBytes);
+
+                if (result.deleted) {
+                    // PERF-001: 삭제 성공 시 count 감소
+                    long currentCount = store.getCollectionCount(collectionId);
+                    store.updateCollectionRootCountAndPublish(collectionId, result.newRootPageId, currentCount - 1);
+
+                    // AUTO 모드면 즉시 커밋
+                    store.commitIfAuto();
+                }
+
+                return oldValue;
+            } finally {
+                store.releaseWriteLock(stamp);
+            }
 
         } catch (ClassCastException e) {
             return null;
         }
     }
     
+    /**
+     * 맵의 엔트리 수를 반환합니다.
+     *
+     * <p><b>PERF-001 수정</b>: O(n) 순회에서 O(1) 조회로 개선.
+     * CollectionState에 저장된 count를 직접 반환합니다.</p>
+     *
+     * @return 맵에 포함된 엔트리 수
+     */
     @Override
     public int size() {
-        int count = 0;
-        BTreeCursor cursor = getBTree().cursor();
-        while (cursor.hasNext()) {
-            cursor.next();
-            count++;
+        long count = store.getCollectionCount(collectionId);
+        // Integer 오버플로우 방지
+        if (count > Integer.MAX_VALUE) {
+            return Integer.MAX_VALUE;
         }
-        return count;
+        return (int) count;
     }
     
     @Override
@@ -317,11 +345,13 @@ public class FxNavigableMapImpl<K, V> implements NavigableMap<K, V>, FxCollectio
      * <p><b>INV-C1 (Single Writer)</b>: 이 메서드는 Write Lock을 획득하여
      * 단일 Writer만 동시에 쓰기할 수 있도록 보장합니다.</p>
      *
-     * <p><b>COW (Copy-on-Write)</b>: 각 BTree 삭제는 stateless API를 통해
-     * 새 루트 페이지를 생성하며, 이전 스냅샷에는 영향을 주지 않습니다.</p>
+     * <p><b>PERF-003: O(1) clear</b>: 이전 구현은 모든 엔트리를 순회하며
+     * 개별 삭제(O(N*log N))했지만, 이제 root를 0으로 설정하여 O(1)입니다.
+     * COW 특성상 기존 페이지는 진행 중인 읽기에 영향을 주지 않습니다.
+     * 실제 페이지 회수는 GC/compaction에서 처리됩니다.</p>
      *
-     * <p>시간 복잡도: O(N) - 모든 엔트리 순회 및 삭제
-     * <p>공간 복잡도: O(N) - 키 목록 임시 저장
+     * <p>시간 복잡도: O(1)
+     * <p>공간 복잡도: O(1)
      */
     @Override
     public void clear() {
@@ -332,26 +362,8 @@ public class FxNavigableMapImpl<K, V> implements NavigableMap<K, V>, FxCollectio
         // Write Lock 획득 (INV-C1)
         long stamp = store.acquireWriteLock();
         try {
-            long currentRoot = getCurrentRootPageId();
-            BTree btree = getBTree();
-
-            // 모든 키 수집 (현재 스냅샷 기준)
-            List<byte[]> keysToRemove = new ArrayList<>();
-            BTreeCursor cursor = btree.cursor();
-            while (cursor.hasNext()) {
-                keysToRemove.add(cursor.next().getKey().clone());
-            }
-
-            // 역순으로 삭제 (트리 밸런스 최적화, COW)
-            for (int i = keysToRemove.size() - 1; i >= 0; i--) {
-                BTree.StatelessDeleteResult result = btree.deleteWithRoot(currentRoot, keysToRemove.get(i));
-                if (result.deleted) {
-                    currentRoot = result.newRootPageId;
-                }
-            }
-
-            // 스냅샷 업데이트 및 게시
-            store.updateCollectionRootAndPublish(collectionId, currentRoot);
+            // PERF-003: O(1) clear - root를 0 (빈 트리)으로, count를 0으로 설정
+            store.updateCollectionRootCountAndPublish(collectionId, 0, 0);
 
             // AUTO 모드면 즉시 커밋
             store.commitIfAuto();
@@ -421,51 +433,194 @@ public class FxNavigableMapImpl<K, V> implements NavigableMap<K, V>, FxCollectio
         return entry.getKey();
     }
     
+    /**
+     * PERF-002: O(log n)으로 최적화된 첫 번째 엔트리 조회
+     *
+     * <p>BTree의 firstEntryWithRoot() Stateless API를 사용하여
+     * 가장 왼쪽 리프까지 O(log n)으로 직접 순회합니다.</p>
+     */
     @Override
     public Entry<K, V> firstEntry() {
-        BTreeCursor cursor = getBTree().cursor();
-        if (!cursor.hasNext()) {
+        long currentRoot = getCurrentRootPageId();
+        BTree btree = getBTree();
+        BTree.Entry entry = btree.firstEntryWithRoot(currentRoot);
+        if (entry == null) {
             return null;
         }
-        BTree.Entry entry = cursor.next();
+        K k = decodeKey(entry.getKey());
+        byte[] valueBytes = store.readValueRecord(entry.getValueRecordId());
+        V v = decodeValue(valueBytes);
+        return new AbstractMap.SimpleImmutableEntry<K, V>(k, v);
+    }
+
+    /**
+     * PERF-002: O(log n)으로 최적화된 마지막 엔트리 조회
+     *
+     * <p>이전 구현은 cursor를 사용해 전체 순회 O(n)이었습니다.
+     * BTree의 lastEntryWithRoot() Stateless API를 사용하여
+     * 가장 오른쪽 리프까지 O(log n)으로 직접 순회합니다.</p>
+     */
+    @Override
+    public Entry<K, V> lastEntry() {
+        long currentRoot = getCurrentRootPageId();
+        BTree btree = getBTree();
+        BTree.Entry entry = btree.lastEntryWithRoot(currentRoot);
+        if (entry == null) {
+            return null;
+        }
         K k = decodeKey(entry.getKey());
         byte[] valueBytes = store.readValueRecord(entry.getValueRecordId());
         V v = decodeValue(valueBytes);
         return new AbstractMap.SimpleImmutableEntry<K, V>(k, v);
     }
     
-    @Override
-    public Entry<K, V> lastEntry() {
-        BTreeCursor cursor = getBTree().cursor();
-        Entry<K, V> lastEntry = null;
-        while (cursor.hasNext()) {
-            BTree.Entry entry = cursor.next();
-            K k = decodeKey(entry.getKey());
-            byte[] valueBytes = store.readValueRecord(entry.getValueRecordId());
-            V v = decodeValue(valueBytes);
-            lastEntry = new AbstractMap.SimpleImmutableEntry<K, V>(k, v);
-        }
-        return lastEntry;
-    }
-    
+    /**
+     * 첫 번째 엔트리를 원자적으로 조회하고 삭제합니다.
+     *
+     * <p><b>CONC-002 수정</b>: 조회와 삭제를 하나의 락 내에서 수행하여
+     * Race Condition 해결</p>
+     *
+     * @return 삭제된 첫 번째 엔트리, 맵이 비어있으면 null
+     */
     @Override
     public Entry<K, V> pollFirstEntry() {
-        Entry<K, V> entry = firstEntry();
-        if (entry != null) {
-            remove(entry.getKey());
+        // CONC-002 수정: 조회와 삭제를 하나의 락 내에서 수행
+        long stamp = store.acquireWriteLock();
+        try {
+            long currentRoot = getCurrentRootPageId();
+            if (currentRoot == 0) {
+                return null;  // 빈 맵
+            }
+
+            BTree btree = getBTree();
+
+            // 락 내에서 첫 번째 엔트리 조회
+            BTreeCursor cursor = btree.cursorWithRoot(currentRoot);
+            if (!cursor.hasNext()) {
+                return null;
+            }
+
+            BTree.Entry btreeEntry = cursor.next();
+            K key = decodeKey(btreeEntry.getKey());
+            byte[] valueBytes = store.readValueRecord(btreeEntry.getValueRecordId());
+            V value = decodeValue(valueBytes);
+
+            // 락 내에서 삭제
+            BTree.StatelessDeleteResult result = btree.deleteWithRoot(
+                currentRoot, btreeEntry.getKey());
+
+            if (result.deleted) {
+                // PERF-001: 삭제 시 count 감소
+                long currentCount = store.getCollectionCount(collectionId);
+                store.updateCollectionRootCountAndPublish(collectionId, result.newRootPageId, currentCount - 1);
+                store.commitIfAuto();
+            }
+
+            return new AbstractMap.SimpleImmutableEntry<>(key, value);
+        } finally {
+            store.releaseWriteLock(stamp);
         }
-        return entry;
     }
-    
+
+    /**
+     * 마지막 엔트리를 원자적으로 조회하고 삭제합니다.
+     *
+     * <p><b>CONC-002 수정</b>: 조회와 삭제를 하나의 락 내에서 수행하여
+     * Race Condition 해결</p>
+     *
+     * @return 삭제된 마지막 엔트리, 맵이 비어있으면 null
+     */
     @Override
     public Entry<K, V> pollLastEntry() {
-        Entry<K, V> entry = lastEntry();
-        if (entry != null) {
-            remove(entry.getKey());
+        // CONC-002 수정: 조회와 삭제를 하나의 락 내에서 수행
+        long stamp = store.acquireWriteLock();
+        try {
+            long currentRoot = getCurrentRootPageId();
+            if (currentRoot == 0) {
+                return null;  // 빈 맵
+            }
+
+            BTree btree = getBTree();
+
+            // 락 내에서 마지막 엔트리 조회 (O(n) 순회 - PERF-002에서 개선 예정)
+            BTreeCursor cursor = btree.cursorWithRoot(currentRoot);
+            BTree.Entry lastBtreeEntry = null;
+            while (cursor.hasNext()) {
+                lastBtreeEntry = cursor.next();
+            }
+
+            if (lastBtreeEntry == null) {
+                return null;
+            }
+
+            K key = decodeKey(lastBtreeEntry.getKey());
+            byte[] valueBytes = store.readValueRecord(lastBtreeEntry.getValueRecordId());
+            V value = decodeValue(valueBytes);
+
+            // 락 내에서 삭제
+            BTree.StatelessDeleteResult result = btree.deleteWithRoot(
+                currentRoot, lastBtreeEntry.getKey());
+
+            if (result.deleted) {
+                // PERF-001: 삭제 시 count 감소
+                long currentCount = store.getCollectionCount(collectionId);
+                store.updateCollectionRootCountAndPublish(collectionId, result.newRootPageId, currentCount - 1);
+                store.commitIfAuto();
+            }
+
+            return new AbstractMap.SimpleImmutableEntry<>(key, value);
+        } finally {
+            store.releaseWriteLock(stamp);
         }
-        return entry;
     }
-    
+
+    // === CONC-003: View 클래스용 내부 헬퍼 메서드 ===
+
+    /**
+     * Write Lock 획득 (View 클래스용).
+     *
+     * <p>View 클래스에서 atomic poll 연산을 구현하기 위해 사용합니다.
+     * 호출자는 반드시 finally 블록에서 {@link #releaseWriteLockInternal(long)}을 호출해야 합니다.</p>
+     *
+     * @return lock stamp
+     */
+    long acquireWriteLockInternal() {
+        return store.acquireWriteLock();
+    }
+
+    /**
+     * Write Lock 해제 (View 클래스용).
+     *
+     * @param stamp {@link #acquireWriteLockInternal()}에서 반환된 stamp
+     */
+    void releaseWriteLockInternal(long stamp) {
+        store.releaseWriteLock(stamp);
+    }
+
+    /**
+     * 키로 엔트리 삭제 (락 없이, 호출자가 이미 Write Lock을 보유해야 함).
+     *
+     * <p><b>주의</b>: 이 메서드는 락을 획득하지 않습니다.
+     * 호출자가 반드시 {@link #acquireWriteLockInternal()}로 Write Lock을 보유한 상태에서 호출해야 합니다.</p>
+     *
+     * @param key 삭제할 키
+     * @return 삭제 성공 여부
+     */
+    boolean removeByKeyUnlocked(K key) {
+        byte[] keyBytes = encodeKey(key);
+        long currentRoot = getCurrentRootPageId();
+        BTree btree = getBTree();
+        BTree.StatelessDeleteResult result = btree.deleteWithRoot(currentRoot, keyBytes);
+        if (result.deleted) {
+            // PERF-001: 삭제 시 count 감소
+            long currentCount = store.getCollectionCount(collectionId);
+            store.updateCollectionRootCountAndPublish(collectionId, result.newRootPageId, currentCount - 1);
+            store.commitIfAuto();
+            return true;
+        }
+        return false;
+    }
+
     @Override
     public Entry<K, V> lowerEntry(K key) {
         if (key == null) {
@@ -1234,27 +1389,54 @@ public class FxNavigableMapImpl<K, V> implements NavigableMap<K, V>, FxCollectio
         }
 
         /**
-         * UOE 개선: 첫 번째 엔트리 조회 후 삭제
+         * CONC-003 수정: Atomic poll (조회 + 삭제를 단일 락 내에서 수행)
+         *
+         * <p>이전 구현은 firstEntry() 호출 후 별도로 remove()를 호출하여
+         * Race Condition이 발생할 수 있었습니다. 이제 단일 Write Lock 내에서
+         * 조회와 삭제를 원자적으로 수행합니다.</p>
          */
         @Override
         public Entry<K, V> pollFirstEntry() {
-            Entry<K, V> first = firstEntry();
-            if (first != null) {
-                parent.remove(first.getKey());
+            long stamp = parent.acquireWriteLockInternal();
+            try {
+                // 범위 내 첫 번째 엔트리 조회 (락 내에서 안전)
+                Entry<K, V> first = null;
+                for (Entry<K, V> entry : parent.entrySet()) {
+                    if (inRange(entry.getKey())) {
+                        first = entry;
+                        break;
+                    }
+                }
+                if (first != null) {
+                    parent.removeByKeyUnlocked(first.getKey());
+                }
+                return first;
+            } finally {
+                parent.releaseWriteLockInternal(stamp);
             }
-            return first;
         }
 
         /**
-         * UOE 개선: 마지막 엔트리 조회 후 삭제
+         * CONC-003 수정: Atomic poll (조회 + 삭제를 단일 락 내에서 수행)
          */
         @Override
         public Entry<K, V> pollLastEntry() {
-            Entry<K, V> last = lastEntry();
-            if (last != null) {
-                parent.remove(last.getKey());
+            long stamp = parent.acquireWriteLockInternal();
+            try {
+                // 범위 내 마지막 엔트리 조회 (락 내에서 안전)
+                Entry<K, V> last = null;
+                for (Entry<K, V> entry : parent.entrySet()) {
+                    if (inRange(entry.getKey())) {
+                        last = entry;
+                    }
+                }
+                if (last != null) {
+                    parent.removeByKeyUnlocked(last.getKey());
+                }
+                return last;
+            } finally {
+                parent.releaseWriteLockInternal(stamp);
             }
-            return last;
         }
 
         @Override
@@ -1553,27 +1735,48 @@ public class FxNavigableMapImpl<K, V> implements NavigableMap<K, V>, FxCollectio
         }
 
         /**
-         * UOE 개선: 첫 번째 엔트리 조회 후 삭제
+         * CONC-003 수정: Atomic poll (조회 + 삭제를 단일 락 내에서 수행)
+         *
+         * <p>HeadMapView의 firstEntry는 parent.firstEntry()를 사용하므로
+         * 범위 검증만 추가로 수행합니다.</p>
          */
         @Override
         public Entry<K, V> pollFirstEntry() {
-            Entry<K, V> first = firstEntry();
-            if (first != null) {
-                parent.remove(first.getKey());
+            long stamp = parent.acquireWriteLockInternal();
+            try {
+                // HeadMap의 firstEntry = parent의 firstEntry (범위 내인 경우)
+                Entry<K, V> first = parent.firstEntry();
+                if (first != null && inRange(first.getKey())) {
+                    parent.removeByKeyUnlocked(first.getKey());
+                    return first;
+                }
+                return null;
+            } finally {
+                parent.releaseWriteLockInternal(stamp);
             }
-            return first;
         }
 
         /**
-         * UOE 개선: 마지막 엔트리 조회 후 삭제
+         * CONC-003 수정: Atomic poll (조회 + 삭제를 단일 락 내에서 수행)
          */
         @Override
         public Entry<K, V> pollLastEntry() {
-            Entry<K, V> last = lastEntry();
-            if (last != null) {
-                parent.remove(last.getKey());
+            long stamp = parent.acquireWriteLockInternal();
+            try {
+                // 범위 내 마지막 엔트리 조회 (락 내에서 안전)
+                Entry<K, V> last = null;
+                for (Entry<K, V> entry : parent.entrySet()) {
+                    if (inRange(entry.getKey())) {
+                        last = entry;
+                    }
+                }
+                if (last != null) {
+                    parent.removeByKeyUnlocked(last.getKey());
+                }
+                return last;
+            } finally {
+                parent.releaseWriteLockInternal(stamp);
             }
-            return last;
         }
 
         @Override
@@ -1831,27 +2034,52 @@ public class FxNavigableMapImpl<K, V> implements NavigableMap<K, V>, FxCollectio
         }
 
         /**
-         * UOE 개선: 첫 번째 엔트리 조회 후 삭제
+         * CONC-003 수정: Atomic poll (조회 + 삭제를 단일 락 내에서 수행)
+         *
+         * <p>TailMapView의 firstEntry는 순회가 필요하므로
+         * 락 내에서 직접 순회하여 첫 번째 엔트리를 찾습니다.</p>
          */
         @Override
         public Entry<K, V> pollFirstEntry() {
-            Entry<K, V> first = firstEntry();
-            if (first != null) {
-                parent.remove(first.getKey());
+            long stamp = parent.acquireWriteLockInternal();
+            try {
+                // 범위 내 첫 번째 엔트리 조회 (락 내에서 안전)
+                Entry<K, V> first = null;
+                for (Entry<K, V> entry : parent.entrySet()) {
+                    if (inRange(entry.getKey())) {
+                        first = entry;
+                        break;
+                    }
+                }
+                if (first != null) {
+                    parent.removeByKeyUnlocked(first.getKey());
+                }
+                return first;
+            } finally {
+                parent.releaseWriteLockInternal(stamp);
             }
-            return first;
         }
 
         /**
-         * UOE 개선: 마지막 엔트리 조회 후 삭제
+         * CONC-003 수정: Atomic poll (조회 + 삭제를 단일 락 내에서 수행)
+         *
+         * <p>TailMapView의 lastEntry는 parent.lastEntry()를 사용하므로
+         * 범위 검증만 추가로 수행합니다.</p>
          */
         @Override
         public Entry<K, V> pollLastEntry() {
-            Entry<K, V> last = lastEntry();
-            if (last != null) {
-                parent.remove(last.getKey());
+            long stamp = parent.acquireWriteLockInternal();
+            try {
+                // TailMap의 lastEntry = parent의 lastEntry (범위 내인 경우)
+                Entry<K, V> last = parent.lastEntry();
+                if (last != null && inRange(last.getKey())) {
+                    parent.removeByKeyUnlocked(last.getKey());
+                    return last;
+                }
+                return null;
+            } finally {
+                parent.releaseWriteLockInternal(stamp);
             }
-            return last;
         }
 
         @Override

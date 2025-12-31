@@ -564,4 +564,173 @@ public class FxNavigableMapCoverageTest {
         assertEquals("one", map.getOrDefault(1L, "default"));
         assertEquals("default", map.getOrDefault(999L, "default"));
     }
+
+    // ==================== putAll 테스트 ====================
+
+    @Test
+    public void putAll_shouldWork() {
+        NavigableMap<Long, String> map = store.createMap("test", Long.class, String.class);
+
+        Map<Long, String> source = new HashMap<>();
+        source.put(1L, "one");
+        source.put(2L, "two");
+        source.put(3L, "three");
+
+        map.putAll(source);
+
+        assertEquals(3, map.size());
+        assertEquals("one", map.get(1L));
+        assertEquals("two", map.get(2L));
+        assertEquals("three", map.get(3L));
+    }
+
+    @Test
+    public void putAll_emptyMap_shouldWork() {
+        NavigableMap<Long, String> map = store.createMap("test", Long.class, String.class);
+        map.put(1L, "existing");
+
+        map.putAll(new HashMap<>());
+
+        assertEquals(1, map.size());
+    }
+
+    @Test
+    public void putAll_overwriteExisting_shouldWork() {
+        NavigableMap<Long, String> map = store.createMap("test", Long.class, String.class);
+        map.put(1L, "old");
+
+        Map<Long, String> source = new HashMap<>();
+        source.put(1L, "new");
+        source.put(2L, "two");
+
+        map.putAll(source);
+
+        assertEquals(2, map.size());
+        assertEquals("new", map.get(1L));
+    }
+
+    // ==================== headMap/tailMap 단일 인자 테스트 ====================
+
+    @Test
+    public void headMap_singleArg_shouldWork() {
+        NavigableMap<Long, String> map = store.createMap("test", Long.class, String.class);
+        for (long i = 1; i <= 10; i++) {
+            map.put(i, "value" + i);
+        }
+
+        // headMap(5L) - exclusive by default
+        SortedMap<Long, String> head = map.headMap(5L);
+
+        assertEquals(4, head.size()); // 1, 2, 3, 4
+        assertTrue(head.containsKey(4L));
+        assertFalse(head.containsKey(5L));
+    }
+
+    @Test
+    public void tailMap_singleArg_shouldWork() {
+        NavigableMap<Long, String> map = store.createMap("test", Long.class, String.class);
+        for (long i = 1; i <= 10; i++) {
+            map.put(i, "value" + i);
+        }
+
+        // tailMap(5L) - inclusive by default
+        SortedMap<Long, String> tail = map.tailMap(5L);
+
+        assertEquals(6, tail.size()); // 5, 6, 7, 8, 9, 10
+        assertTrue(tail.containsKey(5L));
+        assertFalse(tail.containsKey(4L));
+    }
+
+    @Test
+    public void subMap_singleArg_shouldWork() {
+        NavigableMap<Long, String> map = store.createMap("test", Long.class, String.class);
+        for (long i = 1; i <= 10; i++) {
+            map.put(i, "value" + i);
+        }
+
+        // subMap(3L, 7L) - fromInclusive, toExclusive by default
+        SortedMap<Long, String> sub = map.subMap(3L, 7L);
+
+        assertEquals(4, sub.size()); // 3, 4, 5, 6
+        assertTrue(sub.containsKey(3L));
+        assertTrue(sub.containsKey(6L));
+        assertFalse(sub.containsKey(7L));
+    }
+
+    // ==================== SubMapView의 headMap/tailMap 단일 인자 테스트 ====================
+
+    @Test
+    public void subMapView_headMap_singleArg_shouldWork() {
+        NavigableMap<Long, String> map = store.createMap("test", Long.class, String.class);
+        for (long i = 1; i <= 20; i++) {
+            map.put(i, "value" + i);
+        }
+
+        NavigableMap<Long, String> sub = map.subMap(5L, true, 15L, true);
+        SortedMap<Long, String> head = sub.headMap(10L);
+
+        assertEquals(5, head.size()); // 5, 6, 7, 8, 9
+        assertTrue(head.containsKey(5L));
+        assertFalse(head.containsKey(10L));
+    }
+
+    @Test
+    public void subMapView_tailMap_singleArg_shouldWork() {
+        NavigableMap<Long, String> map = store.createMap("test", Long.class, String.class);
+        for (long i = 1; i <= 20; i++) {
+            map.put(i, "value" + i);
+        }
+
+        NavigableMap<Long, String> sub = map.subMap(5L, true, 15L, true);
+        SortedMap<Long, String> tail = sub.tailMap(10L);
+
+        assertEquals(6, tail.size()); // 10, 11, 12, 13, 14, 15
+        assertTrue(tail.containsKey(10L));
+        assertTrue(tail.containsKey(15L));
+    }
+
+    @Test
+    public void subMapView_subMap_singleArg_shouldWork() {
+        NavigableMap<Long, String> map = store.createMap("test", Long.class, String.class);
+        for (long i = 1; i <= 20; i++) {
+            map.put(i, "value" + i);
+        }
+
+        NavigableMap<Long, String> sub = map.subMap(5L, true, 15L, true);
+        SortedMap<Long, String> subSub = sub.subMap(8L, 12L);
+
+        assertEquals(4, subSub.size()); // 8, 9, 10, 11
+        assertTrue(subSub.containsKey(8L));
+        assertFalse(subSub.containsKey(12L));
+    }
+
+    // ==================== comparator 테스트 ====================
+
+    @Test
+    public void comparator_shouldReturnComparator() {
+        NavigableMap<Long, String> map = store.createMap("test", Long.class, String.class);
+        // FxNavigableMap uses a byte comparator
+        Comparator<? super Long> comp = map.comparator();
+        // comparator may be null or non-null depending on implementation
+        if (comp != null) {
+            // Verify it works correctly
+            assertTrue(comp.compare(1L, 2L) < 0);
+            assertTrue(comp.compare(2L, 1L) > 0);
+            assertEquals(0, comp.compare(1L, 1L));
+        }
+    }
+
+    @Test
+    public void subMap_comparator_shouldWork() {
+        NavigableMap<Long, String> map = store.createMap("test", Long.class, String.class);
+        map.put(1L, "one");
+        map.put(10L, "ten");
+
+        NavigableMap<Long, String> sub = map.subMap(3L, true, 8L, true);
+        Comparator<? super Long> comp = sub.comparator();
+        // Verify comparator works if present
+        if (comp != null) {
+            assertTrue(comp.compare(3L, 7L) < 0);
+        }
+    }
 }
