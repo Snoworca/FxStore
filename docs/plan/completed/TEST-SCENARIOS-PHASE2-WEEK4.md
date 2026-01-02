@@ -19,8 +19,8 @@ Week 4에서는 **Append-only Allocator**를 구현합니다. Allocator는 페�
 - BATCH 모드 지원: pending 할당 관리
 
 **참고 문서:**
-- [02.architecture.md](../02.architecture.md) - Section 3.3: Allocator 구현
-- [01.api.md](../01.api.md) - CommitMode
+- [02.architecture.md](../spec/lagacy/02.architecture.md) - Section 3.3: Allocator 구현
+- [01.api.md](../spec/lagacy/01.api.md) - CommitMode
 
 ---
 

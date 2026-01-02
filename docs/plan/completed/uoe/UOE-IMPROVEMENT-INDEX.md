@@ -2,7 +2,7 @@
 
 > **문서 버전:** 1.0
 > **대상:** FxStore 구현팀
-> **기반 문서:** [00.index.md](../00.index.md), [01.api.md](../../01.api.md)
+> **기반 문서:** [00.index.md](../00.index.md), [01.api.md](../../spec/lagacy/01.api.md)
 > **Java 버전:** Java 8
 > **작성일:** 2025-12-29
 
@@ -149,7 +149,7 @@ FxStore v0.8에서 NavigableMap/NavigableSet의 뷰 클래스들이 다수의 `U
 ## 참고 문서
 
 - [../00.index.md](../00.index.md) - FxStore 구현 계획 인덱스
-- [../../01.api.md](../../01.api.md) - FxStore API 명세서
+- [../../01.api.md](../../spec/lagacy/01.api.md) - FxStore API 명세서
 - [Java NavigableMap Javadoc](https://docs.oracle.com/javase/8/docs/api/java/util/NavigableMap.html)
 - [Java NavigableSet Javadoc](https://docs.oracle.com/javase/8/docs/api/java/util/NavigableSet.html)
 

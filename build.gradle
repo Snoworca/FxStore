@@ -1,9 +1,19 @@
 plugins {
     id 'java'
+    id 'java-library'
     id 'jacoco'
+    id 'maven-publish'
+    id 'signing'
 }
 
-group = 'com.fxstore'
+// local.properties에서 민감 정보 로드
+def localProperties = new Properties()
+def localPropertiesFile = rootProject.file('local.properties')
+if (localPropertiesFile.exists()) {
+    localPropertiesFile.withInputStream { localProperties.load(it) }
+}
+
+group = 'com.snoworca'
 version = '0.3.0'
 
 sourceCompatibility = '1.8'
@@ -13,6 +23,8 @@ java {
     toolchain {
         languageVersion = JavaLanguageVersion.of(8)
     }
+    withJavadocJar()
+    withSourcesJar()
 }
 
 repositories {
@@ -48,4 +60,321 @@ jacoco {
 tasks.withType(JavaCompile) {
     options.encoding = 'UTF-8'
     options.compilerArgs << '-Xlint:unchecked' << '-Xlint:deprecation'
+}
+
+// Javadoc 한글 인코딩 설정
+tasks.withType(Javadoc) {
+    options.encoding = 'UTF-8'
+    options.charSet = 'UTF-8'
+    // Java 8에서 strict mode 경고 무시
+    options.addStringOption('Xdoclint:none', '-quiet')
+}
+
+// ============================================
+// Maven Central 배포 설정 (Central Portal)
+// ============================================
+
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            from components.java
+
+            groupId = 'com.snoworca'
+            artifactId = 'fxstore'
+            version = project.version
+
+            pom {
+                name = 'FxStore'
+                description = 'A high-performance embedded key-value store for Java with B+Tree indexing'
+                url = 'https://github.com/snoworca/FxStore'
+
+                licenses {
+                    license {
+                        name = 'The Apache License, Version 2.0'
+                        url = 'http://www.apache.org/licenses/LICENSE-2.0.txt'
+                    }
+                }
+
+                developers {
+                    developer {
+                        id = 'snoworca'
+                        name = 'Snoworca'
+                        email = 'snoworca@example.com'
+                    }
+                }
+
+                scm {
+                    connection = 'scm:git:git://github.com/snoworca/FxStore.git'
+                    developerConnection = 'scm:git:ssh://github.com:snoworca/FxStore.git'
+                    url = 'https://github.com/snoworca/FxStore'
+                }
+            }
+        }
+    }
+
+    repositories {
+        maven {
+            name = "staging"
+            url = layout.buildDirectory.dir("staging-deploy")
+        }
+    }
+}
+
+// signing 설정
+signing {
+    def signingKeyId = localProperties.getProperty('signing.keyId')
+    def signingPassword = localProperties.getProperty('signing.password')
+    def signingKeyFile = localProperties.getProperty('signing.secretKeyRingFile')
+
+    if (signingKeyId && signingPassword && signingKeyFile) {
+        project.ext.'signing.keyId' = signingKeyId
+        project.ext.'signing.password' = signingPassword
+        project.ext.'signing.secretKeyRingFile' = signingKeyFile
+    }
+
+    required { gradle.taskGraph.hasTask("publishMavenJavaPublicationToStagingRepository") }
+    sign publishing.publications.mavenJava
+}
+
+// Central Portal에 업로드할 fxstore-{version}.zip 생성
+task createBundle(type: Zip) {
+    dependsOn 'publishMavenJavaPublicationToStagingRepository'
+
+    archiveFileName = "fxstore-${version}.zip"
+    destinationDirectory = layout.buildDirectory.dir("bundle")
+
+    from(layout.buildDirectory.dir("staging-deploy"))
+}
+
+// ============================================
+// Central Portal HTTP Client 유틸리티
+// ============================================
+
+import javax.net.ssl.HttpsURLConnection
+import java.nio.file.Files
+
+/**
+ * Central Portal에 bundle을 업로드하고 deployment ID를 반환
+ */
+def uploadToCentralPortal(File bundleFile, String username, String password) {
+    def boundary = "----${UUID.randomUUID().toString()}"
+    def lineEnd = "\r\n"
+    def url = new URL("https://central.sonatype.com/api/v1/publisher/upload?publishingType=AUTOMATIC")
+
+    // Base64 인코딩된 인증 토큰
+    def authToken = Base64.encoder.encodeToString("${username}:${password}".getBytes("UTF-8"))
+
+    HttpsURLConnection connection = (HttpsURLConnection) url.openConnection()
+    connection.setDoOutput(true)
+    connection.setDoInput(true)
+    connection.setUseCaches(false)
+    connection.setRequestMethod("POST")
+    connection.setRequestProperty("Authorization", "Bearer ${authToken}")
+    connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=${boundary}")
+    connection.setConnectTimeout(30000)
+    connection.setReadTimeout(120000)
+
+    // Multipart body 작성
+    def outputStream = connection.getOutputStream()
+    def writer = new PrintWriter(new OutputStreamWriter(outputStream, "UTF-8"), true)
+
+    // File part
+    writer.append("--${boundary}").append(lineEnd)
+    writer.append("Content-Disposition: form-data; name=\"bundle\"; filename=\"${bundleFile.getName()}\"").append(lineEnd)
+    writer.append("Content-Type: application/octet-stream").append(lineEnd)
+    writer.append(lineEnd)
+    writer.flush()
+
+    // 파일 데이터 쓰기
+    Files.copy(bundleFile.toPath(), outputStream)
+    outputStream.flush()
+
+    writer.append(lineEnd)
+    writer.append("--${boundary}--").append(lineEnd)
+    writer.flush()
+    writer.close()
+
+    // 응답 처리
+    def responseCode = connection.getResponseCode()
+    def responseBody = ""
+
+    if (responseCode >= 200 && responseCode < 300) {
+        responseBody = connection.getInputStream().getText("UTF-8")
+    } else {
+        def errorStream = connection.getErrorStream()
+        if (errorStream != null) {
+            responseBody = errorStream.getText("UTF-8")
+        }
+    }
+
+    connection.disconnect()
+
+    return [code: responseCode, body: responseBody]
+}
+
+/**
+ * Deployment 상태 확인
+ */
+def checkDeploymentStatus(String deploymentId, String username, String password) {
+    def url = new URL("https://central.sonatype.com/api/v1/publisher/status?id=${deploymentId}")
+    def authToken = Base64.encoder.encodeToString("${username}:${password}".getBytes("UTF-8"))
+
+    HttpsURLConnection connection = (HttpsURLConnection) url.openConnection()
+    connection.setRequestMethod("GET")
+    connection.setRequestProperty("Authorization", "Bearer ${authToken}")
+    connection.setConnectTimeout(10000)
+    connection.setReadTimeout(30000)
+
+    def responseCode = connection.getResponseCode()
+    def responseBody = ""
+
+    if (responseCode >= 200 && responseCode < 300) {
+        responseBody = connection.getInputStream().getText("UTF-8")
+    } else {
+        def errorStream = connection.getErrorStream()
+        if (errorStream != null) {
+            responseBody = errorStream.getText("UTF-8")
+        }
+    }
+
+    connection.disconnect()
+
+    return [code: responseCode, body: responseBody]
+}
+
+// ============================================
+// Central Portal 배포 Tasks
+// ============================================
+
+/**
+ * Central Portal에 bundle 업로드
+ * 사용법: ./gradlew publishToCentralPortal
+ */
+task publishToCentralPortal {
+    dependsOn createBundle
+    group = 'publishing'
+    description = 'Publishes the bundle to Sonatype Central Portal'
+
+    doLast {
+        def username = localProperties.getProperty('centralPortalUsername')
+        def password = localProperties.getProperty('centralPortalPassword')
+        def bundleFile = layout.buildDirectory.file("bundle/fxstore-${version}.zip").get().asFile
+
+        if (!username || !password) {
+            throw new GradleException("Central Portal credentials not found in local.properties. " +
+                    "Please set 'centralPortalUsername' and 'centralPortalPassword'.")
+        }
+
+        if (!bundleFile.exists()) {
+            throw new GradleException("Bundle file not found: ${bundleFile.absolutePath}")
+        }
+
+        println "============================================"
+        println "Publishing to Sonatype Central Portal"
+        println "============================================"
+        println "Bundle: ${bundleFile.absolutePath}"
+        println "Size: ${bundleFile.length()} bytes"
+        println ""
+
+        println "Uploading..."
+        def result = uploadToCentralPortal(bundleFile, username, password)
+
+        if (result.code >= 200 && result.code < 300) {
+            def deploymentId = result.body.trim()
+            println ""
+            println "✅ Upload successful!"
+            println "Deployment ID: ${deploymentId}"
+            println ""
+            println "Check status at: https://central.sonatype.com/publishing/deployments"
+            println "Or run: ./gradlew checkDeploymentStatus -PdeploymentId=${deploymentId}"
+
+            // deployment ID를 파일에 저장
+            def idFile = layout.buildDirectory.file("bundle/deployment-id.txt").get().asFile
+            idFile.text = deploymentId
+        } else {
+            println ""
+            println "❌ Upload failed!"
+            println "HTTP Status: ${result.code}"
+            println "Response: ${result.body}"
+            throw new GradleException("Upload failed with status ${result.code}: ${result.body}")
+        }
+    }
+}
+
+/**
+ * Deployment 상태 확인
+ * 사용법: ./gradlew checkDeploymentStatus -PdeploymentId=xxx
+ */
+task checkDeploymentStatus {
+    group = 'publishing'
+    description = 'Check the status of a Central Portal deployment'
+
+    doLast {
+        def username = localProperties.getProperty('centralPortalUsername')
+        def password = localProperties.getProperty('centralPortalPassword')
+
+        // deployment ID 가져오기 (파라미터 또는 파일에서)
+        def deploymentId = project.hasProperty('deploymentId') ?
+                project.property('deploymentId') :
+                null
+
+        if (!deploymentId) {
+            def idFile = layout.buildDirectory.file("bundle/deployment-id.txt").get().asFile
+            if (idFile.exists()) {
+                deploymentId = idFile.text.trim()
+            }
+        }
+
+        if (!deploymentId) {
+            throw new GradleException("Deployment ID not specified. Use -PdeploymentId=xxx or run publishToCentralPortal first.")
+        }
+
+        if (!username || !password) {
+            throw new GradleException("Central Portal credentials not found in local.properties.")
+        }
+
+        println "Checking deployment status..."
+        println "Deployment ID: ${deploymentId}"
+        println ""
+
+        def result = checkDeploymentStatus(deploymentId, username, password)
+
+        println "HTTP Status: ${result.code}"
+        println "Response: ${result.body}"
+
+        if (result.code >= 200 && result.code < 300) {
+            // JSON 파싱 (간단한 방식)
+            if (result.body.contains('"deploymentState"')) {
+                def stateMatch = result.body =~ /"deploymentState"\s*:\s*"([^"]+)"/
+                if (stateMatch) {
+                    def state = stateMatch[0][1]
+                    println ""
+                    println "Deployment State: ${state}"
+
+                    switch (state) {
+                        case 'PENDING':
+                            println "⏳ Deployment is pending validation..."
+                            break
+                        case 'VALIDATING':
+                            println "🔍 Deployment is being validated..."
+                            break
+                        case 'VALIDATED':
+                            println "✅ Deployment validated! Publishing in progress..."
+                            break
+                        case 'PUBLISHING':
+                            println "📤 Publishing to Maven Central..."
+                            break
+                        case 'PUBLISHED':
+                            println "🎉 Successfully published to Maven Central!"
+                            break
+                        case 'FAILED':
+                            println "❌ Deployment failed. Check the portal for details."
+                            break
+                        default:
+                            println "State: ${state}"
+                    }
+                }
+            }
+        }
+    }
 }
