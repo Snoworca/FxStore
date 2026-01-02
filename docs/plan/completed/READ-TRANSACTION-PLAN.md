@@ -89,8 +89,8 @@ try (ReadTransaction tx = store.beginRead()) {
 |------|--------|
 | [08.phase8-concurrency.md](08.phase8-concurrency.md) | StoreSnapshot, 동시성 모델 기반 |
 | [CONCURRENCY-RESEARCH.md](CONCURRENCY-RESEARCH.md) | ReadTransaction 설계 연구 |
-| [../01.api.md](../spec/lagacy/01.api.md) | FxStore API 명세 |
-| [../02.architecture.md](../spec/lagacy/02.architecture.md) | COW 아키텍처 기반 |
+| [../01.api.md](../../spec/lagacy/01.api.md) | FxStore API 명세 |
+| [../02.architecture.md](../../spec/lagacy/02.architecture.md) | COW 아키텍처 기반 |
 
 ---
 

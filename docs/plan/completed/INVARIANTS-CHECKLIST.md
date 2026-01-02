@@ -1,6 +1,6 @@
 # FxStore 불변식 검증 체크리스트
 
-> **참조 문서**: [@docs/02.architecture.md](../spec/lagacy/02.architecture.md) - 1.2 핵심 불변식  
+> **참조 문서**: [@docs/02.architecture.md](../../spec/lagacy/02.architecture.md) - 1.2 핵심 불변식  
 > **목적**: 모든 Phase에서 불변식 유지 검증  
 > **우선순위**: 최상위 (Highest)
 
@@ -514,7 +514,7 @@ void testNoSpaceReuse() {
 
 ## 참고 자료
 
-- [@docs/02.architecture.md - 1.2 핵심 불변식](../spec/lagacy/02.architecture.md#12-핵심-불변식-invariants)
+- [@docs/02.architecture.md - 1.2 핵심 불변식](../../spec/lagacy/02.architecture.md#12-핵심-불변식-invariants)
 - [03.quality-criteria.md](03.quality-criteria.md)
 - [04.regression-process.md](04.regression-process.md)
 

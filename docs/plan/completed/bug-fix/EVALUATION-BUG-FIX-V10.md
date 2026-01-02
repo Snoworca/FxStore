@@ -5,7 +5,7 @@
 > **대상:** BUG-001, BUG-002, BUG-003 수정
 > **평가 결과:** **7/7 A+ 달성** ✅
 
-[← 목차로 돌아가기](../00.index.md)
+[← 목차로 돌아가기](../../00.index.md)
 
 ---
 
@@ -17,7 +17,7 @@
 - **BUG-003:** verify() 신규 스토어 오류
 
 ### 1.2 평가 기준
-[03.quality-criteria.md](../03.quality-criteria.md)의 7가지 품질 기준 적용
+[03.quality-criteria.md](../../03.quality-criteria.md)의 7가지 품질 기준 적용
 
 ---
 

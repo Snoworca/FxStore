@@ -1600,10 +1600,10 @@ jacocoTestCoverageVerification {
 
 ## 관련 문서
 
-- [UOE 개선 계획](./uoe/UOE-IMPROVEMENT-INDEX.md)
-- [View 커버리지 개선](./COVERAGE-IMPROVEMENT-P1P2P3.md)
-- [품질 정책](./QUALITY-POLICY.md)
-- [테스트 전략](./02.test-strategy.md)
+- [UOE 개선 계획](uoe/UOE-IMPROVEMENT-INDEX.md)
+- [View 커버리지 개선](COVERAGE-IMPROVEMENT-P1P2P3.md)
+- [품질 정책](QUALITY-POLICY.md)
+- [테스트 전략](02.test-strategy.md)
 
 ---
 
