@@ -6,7 +6,7 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Java](https://img.shields.io/badge/Java-8%2B-orange.svg)](https://www.oracle.com/java/)
 
-FxStore는 Java 표준 컬렉션 인터페이스(`NavigableMap`, `NavigableSet`, `List`, `Deque`)를 구현하면서 데이터를 **단일 파일에 영속적으로 저장**하는 임베디드 데이터베이스입니다.
+FxStore는 Java 표준 컬렉션 인터페이스(`NavigableMap`(Map), `NavigableSet`(Set), `List`, `Deque`)를 구현하면서 데이터를 **단일 파일에 영속적으로 저장**하는 임베디드 데이터베이스입니다.
 
 ## 주요 특징
 
